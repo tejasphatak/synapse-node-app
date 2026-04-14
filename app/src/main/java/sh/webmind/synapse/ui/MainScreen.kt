@@ -36,6 +36,8 @@ fun MainScreen(viewModel: NodeViewModel) {
     val contributing by viewModel.contributing.collectAsState()
     val chargingOnly by viewModel.chargingOnly.collectAsState()
     val coordUrl by viewModel.coordinatorUrl.collectAsState()
+    val availableUpdate by viewModel.availableUpdate.collectAsState()
+    val updateDownloading by viewModel.updateDownloading.collectAsState()
 
     val scope = rememberCoroutineScope()
 
@@ -71,6 +73,41 @@ fun MainScreen(viewModel: NodeViewModel) {
             .navigationBarsPadding()
             .verticalScroll(rememberScrollState())
     ) {
+        // Update banner — shown above header when newer version on GitHub
+        availableUpdate?.let { release ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Accent.copy(alpha = 0.12f))
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("↑", fontFamily = Mono, fontSize = 16.sp, color = Accent, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.width(10.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        "${release.tagName} available",
+                        fontFamily = Mono, fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold, color = Accent
+                    )
+                    Text(
+                        "tap update to install",
+                        fontFamily = Mono, fontSize = 10.sp, color = TextSecondary
+                    )
+                }
+                if (updateDownloading) {
+                    Text("downloading…", fontFamily = Mono, fontSize = 11.sp, color = TextSecondary)
+                } else {
+                    TextButton(onClick = { viewModel.installUpdate() }, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)) {
+                        Text("update", fontFamily = Mono, fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Accent)
+                    }
+                    TextButton(onClick = { viewModel.dismissUpdate() }, contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp)) {
+                        Text("×", fontFamily = Mono, fontSize = 14.sp, color = TextSubtle)
+                    }
+                }
+            }
+        }
+
         // Header
         Row(
             modifier = Modifier.fillMaxWidth().padding(20.dp),
@@ -289,21 +326,28 @@ private fun BadgeChip(emoji: String, title: String, earned: Boolean) {
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
 private fun SynapseWebView(url: String, onTokens: (Long) -> Unit, onRequest: () -> Unit) {
-    val ctx = LocalContext.current
     AndroidView(
-        factory = {
-            WebView(it).apply {
+        factory = { ctx ->
+            WebView(ctx).apply {
+                // Critical: keeps WebView running even when offscreen / backgrounded
+                if (androidx.webkit.WebViewFeature.isFeatureSupported(
+                        androidx.webkit.WebViewFeature.OFF_SCREEN_PRERASTER)) {
+                    androidx.webkit.WebSettingsCompat.setOffscreenPreRaster(settings, true)
+                }
                 settings.javaScriptEnabled = true
                 settings.domStorageEnabled = true
                 settings.databaseEnabled = true
                 settings.mediaPlaybackRequiresUserGesture = false
+                // Allow mixed-content (some node assets may be http-fetched)
+                settings.mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                // Don't pause timers when window loses focus
+                resumeTimers()
 
                 webChromeClient = WebChromeClient()
                 webViewClient = object : WebViewClient() {
                     override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean = false
                 }
 
-                // Bridge so node JS can report back
                 addJavascriptInterface(object {
                     @android.webkit.JavascriptInterface
                     fun tokens(count: Int) { onTokens(count.toLong()) }
@@ -313,10 +357,14 @@ private fun SynapseWebView(url: String, onTokens: (Long) -> Unit, onRequest: () 
                 }, "SynapseBridge")
 
                 loadUrl(url)
-                layoutParams = android.view.ViewGroup.LayoutParams(1, 1) // hidden
             }
         },
-        modifier = Modifier.size(1.dp)
+        update = { wv ->
+            // Re-resume timers each recomposition (defensive)
+            wv.resumeTimers()
+        },
+        // Larger off-screen-ish layout — Android won't pause it
+        modifier = Modifier.size(2.dp)
     )
 }
 

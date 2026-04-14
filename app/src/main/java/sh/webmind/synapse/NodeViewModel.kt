@@ -7,8 +7,10 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+import sh.webmind.synapse.data.LatestRelease
 import sh.webmind.synapse.data.Stats
 import sh.webmind.synapse.data.StatsRepo
+import sh.webmind.synapse.data.SynapseUpdater
 import sh.webmind.synapse.service.NodeService
 
 class NodeViewModel(app: Application) : AndroidViewModel(app) {
@@ -20,8 +22,47 @@ class NodeViewModel(app: Application) : AndroidViewModel(app) {
     val contributing: StateFlow<Boolean> = repo.contributing.stateIn(viewModelScope, SharingStarted.Eagerly, false)
     val chargingOnly: StateFlow<Boolean> = repo.chargingOnly.stateIn(viewModelScope, SharingStarted.Eagerly, false)
 
-    private val _coordinatorUrl = MutableStateFlow("https://chat.webmind.sh/node")
+    private val _coordinatorUrl = MutableStateFlow("https://node.webmind.sh/node/index.html")
     val coordinatorUrl: StateFlow<String> = _coordinatorUrl.asStateFlow()
+
+    // ── Update state ──
+    private val _availableUpdate = MutableStateFlow<LatestRelease?>(null)
+    val availableUpdate: StateFlow<LatestRelease?> = _availableUpdate.asStateFlow()
+    private val _updateDownloading = MutableStateFlow(false)
+    val updateDownloading: StateFlow<Boolean> = _updateDownloading.asStateFlow()
+
+    init {
+        // Periodic update check — on launch and every 6h
+        viewModelScope.launch {
+            while (true) {
+                try {
+                    val current = ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName ?: "1.0"
+                    val release = SynapseUpdater.checkForUpdate(current)
+                    if (release != null && SynapseUpdater.apkAssetOf(release) != null) {
+                        _availableUpdate.value = release
+                    }
+                } catch (_: Exception) { }
+                kotlinx.coroutines.delay(6 * 60 * 60 * 1000L)
+            }
+        }
+    }
+
+    fun installUpdate() {
+        val release = _availableUpdate.value ?: return
+        val asset = SynapseUpdater.apkAssetOf(release) ?: return
+        viewModelScope.launch {
+            _updateDownloading.value = true
+            try {
+                val file = SynapseUpdater.downloadApk(ctx, asset.downloadUrl)
+                SynapseUpdater.promptInstall(ctx, file)
+            } catch (_: Exception) { }
+            _updateDownloading.value = false
+        }
+    }
+
+    fun dismissUpdate() {
+        _availableUpdate.value = null
+    }
 
     fun toggleContributing() {
         val on = !contributing.value
