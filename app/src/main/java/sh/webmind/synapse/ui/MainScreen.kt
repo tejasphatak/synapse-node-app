@@ -2,334 +2,118 @@ package sh.webmind.synapse.ui
 
 import android.annotation.SuppressLint
 import android.webkit.*
-import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import sh.webmind.synapse.NodeViewModel
-import sh.webmind.synapse.data.Badges
+import sh.webmind.synapse.service.NodeService
 import sh.webmind.synapse.ui.theme.*
 
+/**
+ * Fullscreen WebView hosting https://synapse.webmind.sh/ — same UI as the
+ * website so there's only one surface to maintain. All chrome (status strip,
+ * chat, Contribute toggle, log drawer) lives in the web page.
+ *
+ * Native stays minimal:
+ *  - Starts the foreground service on app launch so GPU compute keeps
+ *    running when the user backgrounds the app (combined with game-mode +
+ *    mediaPlayback FG type per v1.0.2 manifest).
+ *  - Thin update-available banner overlay, since in-app updates are a
+ *    Kotlin-only feature not reachable from inside the WebView.
+ */
+@SuppressLint("SetJavaScriptEnabled")
 @Composable
 fun MainScreen(viewModel: NodeViewModel) {
-    val stats by viewModel.stats.collectAsState()
-    val contributing by viewModel.contributing.collectAsState()
-    val chargingOnly by viewModel.chargingOnly.collectAsState()
     val coordUrl by viewModel.coordinatorUrl.collectAsState()
     val availableUpdate by viewModel.availableUpdate.collectAsState()
     val updateDownloading by viewModel.updateDownloading.collectAsState()
+    val ctx = LocalContext.current
 
-    val scope = rememberCoroutineScope()
-
-    // Periodic active-seconds ticker when contributing
-    LaunchedEffect(contributing) {
-        if (contributing) {
-            while (true) {
-                delay(10_000)
-                viewModel.addActiveSeconds(10)
-            }
-        }
+    // Start the foreground service as soon as the app opens so GPU
+    // compute keeps running when backgrounded. Stop it when the composable
+    // is removed — in practice that only happens when the user force-
+    // closes the app.
+    DisposableEffect(Unit) {
+        NodeService.start(ctx)
+        onDispose { /* let the service outlive the Activity; user stops via notification */ }
     }
 
-    // Battery guard
-    LaunchedEffect(contributing) {
-        while (true) {
-            delay(30_000)
-            if (contributing.not()) { delay(60_000); continue }
-            val level = viewModel.batteryLevel()
-            if (level in 1..19) {
-                viewModel.toggleContributing() // auto-stop at low battery
-            } else if (chargingOnly && !viewModel.isCharging()) {
-                viewModel.toggleContributing()
-            }
-        }
-    }
-
-    Column(
+    Box(
         modifier = Modifier
             .fillMaxSize()
             .background(BgPrimary)
             .statusBarsPadding()
-            .navigationBarsPadding()
-            .verticalScroll(rememberScrollState())
+            .navigationBarsPadding(),
     ) {
-        // Update banner — shown above header when newer version on GitHub
+        // Fullscreen WebView — the unified Synapse page IS the app.
+        SynapseWebView(
+            url = coordUrl,
+            modifier = Modifier.fillMaxSize(),
+            onTokens = { viewModel.recordTokens(it) },
+            onRequest = { viewModel.recordRequest() },
+        )
+
+        // Update banner overlay — slides in at top when a new release is
+        // available on GitHub. Native Compose because in-app install needs
+        // Android APIs unreachable from the WebView.
         availableUpdate?.let { release ->
-            Row(
+            Surface(
+                color = Accent.copy(alpha = 0.95f),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(Accent.copy(alpha = 0.12f))
-                    .padding(horizontal = 16.dp, vertical = 10.dp),
-                verticalAlignment = Alignment.CenterVertically
+                    .align(Alignment.TopCenter),
             ) {
-                Text("↑", fontFamily = Mono, fontSize = 16.sp, color = Accent, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.width(10.dp))
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        "${release.tagName} available",
-                        fontFamily = Mono, fontSize = 13.sp,
-                        fontWeight = FontWeight.Bold, color = Accent
-                    )
-                    Text(
-                        "tap update to install",
-                        fontFamily = Mono, fontSize = 10.sp, color = TextSecondary
-                    )
-                }
-                if (updateDownloading) {
-                    Text("downloading…", fontFamily = Mono, fontSize = 11.sp, color = TextSecondary)
-                } else {
-                    TextButton(onClick = { viewModel.installUpdate() }, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)) {
-                        Text("update", fontFamily = Mono, fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Accent)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            "${release.tagName} available",
+                            fontFamily = Mono, fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold, color = BgPrimary,
+                        )
+                        Text(
+                            if (updateDownloading) "downloading…" else "tap update to install",
+                            fontFamily = Mono, fontSize = 10.sp, color = BgPrimary,
+                        )
                     }
-                    TextButton(onClick = { viewModel.dismissUpdate() }, contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp)) {
-                        Text("×", fontFamily = Mono, fontSize = 14.sp, color = TextSubtle)
+                    TextButton(onClick = { viewModel.installUpdate() }) {
+                        Text("update", fontFamily = Mono, fontSize = 12.sp,
+                             fontWeight = FontWeight.Bold, color = BgPrimary)
+                    }
+                    TextButton(onClick = { viewModel.dismissUpdate() }) {
+                        Text("×", fontFamily = Mono, fontSize = 14.sp, color = BgPrimary)
                     }
                 }
             }
         }
-
-        // Header
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(20.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            PulsingNode(active = contributing)
-            Spacer(Modifier.width(12.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text("Synapse", fontFamily = Mono, fontSize = 22.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
-                Text(
-                    if (contributing) "your phone is thinking"
-                    else "tap to contribute compute",
-                    fontFamily = Mono, fontSize = 12.sp, color = TextSecondary
-                )
-            }
-            // Handle badge
-            Text(
-                stats.handle,
-                fontFamily = Mono, fontSize = 10.sp,
-                color = AccentLight,
-                modifier = Modifier
-                    .background(Accent.copy(alpha = 0.1f), RoundedCornerShape(4.dp))
-                    .padding(horizontal = 8.dp, vertical = 3.dp)
-            )
-        }
-
-        // Big toggle
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 20.dp, vertical = 8.dp)
-        ) {
-            Button(
-                onClick = { viewModel.toggleContributing() },
-                modifier = Modifier.fillMaxWidth().height(60.dp),
-                shape = RoundedCornerShape(12.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = if (contributing) Accent else BgElevated,
-                    contentColor = if (contributing) BgPrimary else TextPrimary
-                )
-            ) {
-                Text(
-                    if (contributing) "● contributing  tap to stop"
-                    else "○ start contributing",
-                    fontFamily = Mono, fontSize = 14.sp, fontWeight = FontWeight.Bold
-                )
-            }
-        }
-
-        // Stats grid
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            StatCard("tokens", formatNumber(stats.tokensProcessed), Accent, Modifier.weight(1f))
-            StatCard("requests", formatNumber(stats.requestsHandled), Cyan, Modifier.weight(1f))
-            StatCard("uptime", formatDuration(stats.activeSeconds), Violet, Modifier.weight(1f))
-        }
-
-        // Settings card
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 20.dp, vertical = 8.dp)
-                .background(BgSurface, RoundedCornerShape(10.dp))
-                .padding(16.dp)
-        ) {
-            Text("settings", fontFamily = Mono, fontSize = 11.sp, color = TextSubtle)
-            Spacer(Modifier.height(8.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("only when charging", fontFamily = Mono, fontSize = 13.sp, color = TextPrimary, modifier = Modifier.weight(1f))
-                Switch(
-                    checked = chargingOnly,
-                    onCheckedChange = { viewModel.setChargingOnly(it) },
-                    colors = SwitchDefaults.colors(
-                        checkedThumbColor = Accent, checkedTrackColor = Accent.copy(alpha = 0.3f)
-                    )
-                )
-            }
-            Spacer(Modifier.height(6.dp))
-            Text(
-                "auto-stops below 20% battery",
-                fontFamily = Mono, fontSize = 11.sp, color = TextSubtle
-            )
-        }
-
-        // Badges
-        Column(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp)
-        ) {
-            Text(
-                "badges — ${stats.badges.size}/${Badges.ALL.size}",
-                fontFamily = Mono, fontSize = 11.sp, color = TextSubtle,
-                modifier = Modifier.padding(bottom = 8.dp)
-            )
-            LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                items(Badges.ALL) { badge ->
-                    val earned = badge.id in stats.badges
-                    BadgeChip(badge.emoji, badge.title, earned)
-                }
-            }
-        }
-
-        // Status message
-        if (contributing) {
-            Text(
-                when {
-                    stats.tokensProcessed == 0L -> "connecting to the mesh…"
-                    stats.tokensProcessed < 100 -> "warming up"
-                    stats.tokensProcessed < 1000 -> "in the flow"
-                    else -> "quietly thinking with the world"
-                },
-                fontFamily = Mono, fontSize = 12.sp, color = TextSecondary,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.fillMaxWidth().padding(16.dp)
-            )
-        }
-
-        // Hidden WebView — runs the actual Synapse node logic
-        if (contributing) {
-            SynapseWebView(
-                url = coordUrl,
-                onTokens = { viewModel.recordTokens(it) },
-                onRequest = { viewModel.recordRequest() }
-            )
-        }
-
-        Spacer(Modifier.height(24.dp))
-
-        // Footer
-        Text(
-            "ai-generated app — built by Claude, idea by Tejas",
-            fontFamily = Mono, fontSize = 9.sp, color = TextSubtle,
-            textAlign = TextAlign.Center,
-            modifier = Modifier.fillMaxWidth().padding(16.dp)
-        )
-    }
-}
-
-@Composable
-private fun PulsingNode(active: Boolean) {
-    val infinite = rememberInfiniteTransition(label = "node")
-    val scale by infinite.animateFloat(
-        initialValue = 1f,
-        targetValue = if (active) 1.25f else 1.05f,
-        animationSpec = infiniteRepeatable(tween(1200, easing = FastOutSlowInEasing), RepeatMode.Reverse),
-        label = "scale"
-    )
-    val glow by infinite.animateFloat(
-        initialValue = 0.3f, targetValue = if (active) 1f else 0.3f,
-        animationSpec = infiniteRepeatable(tween(1200, easing = LinearEasing), RepeatMode.Reverse),
-        label = "glow"
-    )
-    Box(
-        modifier = Modifier.size(48.dp),
-        contentAlignment = Alignment.Center
-    ) {
-        Box(
-            modifier = Modifier
-                .size((28 * scale).dp)
-                .clip(CircleShape)
-                .background(Accent.copy(alpha = glow * 0.2f))
-        )
-        Box(
-            modifier = Modifier
-                .size(18.dp)
-                .clip(CircleShape)
-                .background(if (active) Accent else TextSubtle)
-        )
-        Box(
-            modifier = Modifier
-                .size(8.dp)
-                .clip(CircleShape)
-                .background(AccentLight)
-        )
-    }
-}
-
-@Composable
-private fun StatCard(label: String, value: String, color: Color, mod: Modifier = Modifier) {
-    Column(
-        modifier = mod
-            .background(BgSurface, RoundedCornerShape(10.dp))
-            .padding(16.dp)
-    ) {
-        Text(label, fontFamily = Mono, fontSize = 10.sp, color = TextSubtle)
-        Spacer(Modifier.height(4.dp))
-        Text(value, fontFamily = Mono, fontSize = 18.sp, fontWeight = FontWeight.Bold, color = color)
-    }
-}
-
-@Composable
-private fun BadgeChip(emoji: String, title: String, earned: Boolean) {
-    Column(
-        horizontalAlignment = Alignment.CenterHorizontally,
-        modifier = Modifier
-            .background(BgSurface, RoundedCornerShape(10.dp))
-            .padding(horizontal = 12.dp, vertical = 10.dp)
-            .width(80.dp)
-    ) {
-        Text(
-            if (earned) emoji else "·",
-            fontSize = 22.sp,
-            modifier = Modifier.alpha(if (earned) 1f else 0.3f)
-        )
-        Spacer(Modifier.height(4.dp))
-        Text(
-            title, fontFamily = Mono, fontSize = 9.sp,
-            color = if (earned) TextPrimary else TextSubtle,
-            textAlign = TextAlign.Center,
-            maxLines = 2
-        )
     }
 }
 
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
-private fun SynapseWebView(url: String, onTokens: (Long) -> Unit, onRequest: () -> Unit) {
+private fun SynapseWebView(
+    url: String,
+    modifier: Modifier = Modifier,
+    onTokens: (Long) -> Unit,
+    onRequest: () -> Unit,
+) {
     AndroidView(
         factory = { ctx ->
             WebView(ctx).apply {
-                // Critical: keeps WebView running even when offscreen / backgrounded
+                // Critical for background operation: keeps WebView rasterizing
+                // even when it's offscreen or the activity is backgrounded.
                 if (androidx.webkit.WebViewFeature.isFeatureSupported(
                         androidx.webkit.WebViewFeature.OFF_SCREEN_PRERASTER)) {
                     androidx.webkit.WebSettingsCompat.setOffscreenPreRaster(settings, true)
@@ -338,47 +122,30 @@ private fun SynapseWebView(url: String, onTokens: (Long) -> Unit, onRequest: () 
                 settings.domStorageEnabled = true
                 settings.databaseEnabled = true
                 settings.mediaPlaybackRequiresUserGesture = false
-                // Allow mixed-content (some node assets may be http-fetched)
-                settings.mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
-                // Don't pause timers when window loses focus
+                settings.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                // Don't pause timers when the activity is paused/stopped.
                 resumeTimers()
 
                 webChromeClient = WebChromeClient()
                 webViewClient = object : WebViewClient() {
+                    // Load all URLs inside the WebView (don't kick out to browser).
                     override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean = false
                 }
 
+                // JS bridge so the page can report compute stats back to native.
                 addJavascriptInterface(object {
-                    @android.webkit.JavascriptInterface
-                    fun tokens(count: Int) { onTokens(count.toLong()) }
-
-                    @android.webkit.JavascriptInterface
-                    fun request() { onRequest() }
+                    @JavascriptInterface fun tokens(count: Int) { onTokens(count.toLong()) }
+                    @JavascriptInterface fun request() { onRequest() }
                 }, "SynapseBridge")
 
                 loadUrl(url)
             }
         },
         update = { wv ->
-            // Re-resume timers each recomposition (defensive)
+            // Re-resume timers each recomposition — defensive against
+            // implicit onPause from Compose lifecycle transitions.
             wv.resumeTimers()
         },
-        // Larger off-screen-ish layout — Android won't pause it
-        modifier = Modifier.size(2.dp)
+        modifier = modifier,
     )
 }
-
-// Formatters
-private fun formatNumber(n: Long): String = when {
-    n >= 1_000_000 -> "${n / 1_000_000}.${(n % 1_000_000) / 100_000}M"
-    n >= 1_000 -> "${n / 1_000}.${(n % 1_000) / 100}k"
-    else -> n.toString()
-}
-
-private fun formatDuration(seconds: Long): String = when {
-    seconds >= 86_400 -> "${seconds / 86_400}d"
-    seconds >= 3_600 -> "${seconds / 3_600}h"
-    seconds >= 60 -> "${seconds / 60}m"
-    else -> "${seconds}s"
-}
-
