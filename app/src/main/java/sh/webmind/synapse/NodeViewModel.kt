@@ -22,7 +22,7 @@ class NodeViewModel(app: Application) : AndroidViewModel(app) {
     val contributing: StateFlow<Boolean> = repo.contributing.stateIn(viewModelScope, SharingStarted.Eagerly, false)
     val chargingOnly: StateFlow<Boolean> = repo.chargingOnly.stateIn(viewModelScope, SharingStarted.Eagerly, false)
 
-    private val _coordinatorUrl = MutableStateFlow("https://synapse.webmind.sh/node/index.html")
+    private val _coordinatorUrl = MutableStateFlow("https://synapse.webmind.sh/")
     val coordinatorUrl: StateFlow<String> = _coordinatorUrl.asStateFlow()
 
     // ── Update state ──
